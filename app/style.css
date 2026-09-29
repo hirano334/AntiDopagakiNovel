@@ -100,3 +100,9 @@ html, body {
 #sheet .note { margin-bottom: 10px; }
 #sheet .ntext { font: 18px/1.6 "Noto Serif", Georgia, serif; }
 #sheet .ntext .w.on { background: var(--tap); border-radius: 3px; }
+#sheet .kb {
+  float: right; margin-top: 4px; padding: 4px 0 4px 12px;
+  font: 13px/1 system-ui, sans-serif; color: var(--accent); text-decoration: none;
+}
+#sheet .ai { margin-left: 8px; font-size: 11px; color: var(--dim); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
+#sheet .note-ai { color: var(--dim); font-size: 13px; margin: 2px 0; }

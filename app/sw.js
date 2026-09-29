@@ -1,6 +1,6 @@
 // アプリ本体と本のデータをすべてキャッシュし、以後はキャッシュ優先で返す。
 // 本文や app を更新したら VERSION を上げること。
-const VERSION = 'v2';
+const VERSION = 'v3';
 const FILES = [
   './', 'index.html', 'style.css', 'app.js', 'manifest.json',
   'icon-192.png', 'icon-512.png', 'books/karamazov.json',

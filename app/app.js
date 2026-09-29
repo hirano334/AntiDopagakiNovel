@@ -74,7 +74,9 @@ function glossHtml(keys) {
   let h = '';
   for (const k of keys) {
     for (const e of book.dict[k] || []) {
-      h += `<div><span class="pos">${esc(e.pos)}</span>${k !== keys[0] ? esc(k) : ''}</div>`;
+      h += `<div><span class="pos">${esc(e.pos)}</span>${k !== keys[0] ? esc(k.replace(/^ai:/, '')) : ''}`;
+      h += e.ai ? '<span class="ai">AI生成</span></div>' : '</div>';
+      if (e.note) h += `<div class="note-ai">${esc(e.note)}</div>`;
       h += '<ol>' + e.g.map((g) => `<li>${esc(g)}</li>`).join('') + '</ol>';
     }
   }
@@ -90,7 +92,13 @@ function findPhrase(p, s, t) {
 function wordHtml(sid) {
   let h = '';
   for (const [lemma, pos, form, keys] of book.forms[book.sf[sid]]) {
-    h += `<div class="grp"><div class="hw">${esc(lemma)}</div>`;
+    h += `<div class="grp"><div class="hw">${esc(lemma)}`;
+    // 露和辞典（コトバンク）。見出し語は ё 付きでないと引けない。形動詞は動詞の不定形で引く
+    if (!pos.includes('固有名詞')) {
+      const q = lemma.split(' ← ').pop();
+      h += `<a class="kb" href="https://kotobank.jp/rujaword/${encodeURIComponent(q)}" target="_blank" rel="noopener">コトバンク ↗</a>`;
+    }
+    h += '</div>';
     h += `<div class="meta">${esc(pos)}${form ? ' · ' + esc(form) : ''}</div>`;
     h += keys.length ? glossHtml(keys) : '<div class="none">辞書に見出しなし</div>';
     h += '</div>';
@@ -177,10 +185,10 @@ function openToc() {
 document.addEventListener('click', (ev) => {
   if (!book) return;
   const el = ev.target;
-  if (el === where) { toc.hidden ? openToc() : (toc.hidden = true); return; }
   if (!toc.hidden) {
     const li = el.closest('li[data-i]');
     if (li) { toc.hidden = true; go(book.toc[+li.dataset.i].c); }
+    else if (el === where) toc.hidden = true;
     return;
   }
   if (sheet.contains(el)) {
@@ -189,11 +197,13 @@ document.addEventListener('click', (ev) => {
     }
     return;
   }
+  // シートが開いているあいだは、外側のどこをタップしても閉じるだけ（誤ってページ送りや別の語を引かないように）
+  if (!sheet.hidden) { closeSheet(); return; }
+  if (el === where) { openToc(); return; }
   if (el.classList.contains('nt')) { showNote(el.dataset.n, el); return; }
   if (el.id === 'navR') { go(cur + 1); return; }
   if (el.id === 'navL') { go(cur - 1); return; }
   if (el.classList.contains('w')) { showWord(el); return; }
-  if (!sheet.hidden) { closeSheet(); return; }
   // 本文より下の余白 → 次へ
   if (ev.clientY > text.getBoundingClientRect().bottom) go(cur + 1);
 });

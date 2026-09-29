@@ -138,10 +138,11 @@ def parse_fb2(path):
 # ---------- 形態素解析 ----------
 
 class Analyzer:
-    def __init__(self, dic, formof):
+    def __init__(self, dic, formof, llm=None):
         self.morph = pymorphy3.MorphAnalyzer()
         self.dic = dic
         self.formof = formof
+        self.llm = llm or {}   # gen_glosses.py で生成した、辞書にない語の語義
         self.form_ids = {}
         self.forms = []
         self.lemma_sets = []   # formId → 見出し語（正規化）の集合。成句照合用
@@ -195,6 +196,12 @@ class Analyzer:
                 found = [s]
             else:
                 found = [k for k in self.formof.get(s, []) if k in self.dic]
+        if not found:
+            k = norm(p.normal_form)
+            e = self.llm.get(k)
+            if e and e["g"]:
+                self.dic["ai:" + k] = [{"pos": e["pos"], "g": e["g"], "note": e["note"], "ai": 1}]
+                found = ["ai:" + k]
         return found[:2]
 
     def analyze(self, surface):
@@ -387,7 +394,9 @@ def main():
     formof = json.load(open(WORK / "formof_ru.json", encoding="utf-8"))
     phrases = json.load(open(WORK / "phrases.json", encoding="utf-8"))
 
-    an = Analyzer(dic, formof)
+    llm_path = ROOT / "data/llm_glosses.json"
+    llm = json.load(open(llm_path, encoding="utf-8")) if llm_path.exists() else {}
+    an = Analyzer(dic, formof, llm)
     pm = PhraseMatcher(phrases, an.morph)
 
     chapters, notes = parse_fb2(args.fb2)
