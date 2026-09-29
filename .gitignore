@@ -1,0 +1,6 @@
+data/raw/*.jsonl
+data/raw/*.gz
+data/work/
+*:Zone.Identifier
+__pycache__/
+.venv/
