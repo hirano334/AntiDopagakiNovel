@@ -22,22 +22,30 @@ function esc(s) {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
-// 文の配列は「数値＝単語（surfId）」「文字列＝空白・句読点」の交互
+// 文の配列の要素は「数値＝単語（surfId）」「文字列＝空白・句読点」「{n}＝原注の参照」。
+// 本文の単語は文中の位置 data-t、原注の中の単語は surfId そのもの data-x で識別する。
+function sentHtml(arr, inNote) {
+  let h = '';
+  arr.forEach((x, ti) => {
+    if (typeof x === 'number') {
+      h += inNote ? `<span class="w" data-x="${x}" data-i="${ti}">` : `<span class="w" data-t="${ti}">`;
+      h += esc(book.surf[x]) + '</span>';
+    } else if (typeof x === 'string') {
+      h += esc(x);
+    } else if (!inNote) {
+      h += `<sup class="nt" data-n="${x.n}">${x.n}</sup>`;
+    }
+  });
+  return h;
+}
+
 function render() {
   const ch = book.chunks[cur];
   let html = '';
   ch.p.forEach((para, pi) => {
     html += `<p class="k-${para.k}${para.c ? ' c' : ''}">`;
     para.s.forEach((arr, si) => {
-      html += `<span class="sen" data-p="${pi}" data-s="${si}">`;
-      arr.forEach((x, ti) => {
-        if (typeof x === 'number') {
-          html += `<span class="w" data-t="${ti}">${esc(book.surf[x])}</span>`;
-        } else {
-          html += esc(x);
-        }
-      });
-      html += '</span>' + (si < para.s.length - 1 ? ' ' : '');
+      html += `<span class="sen" data-p="${pi}" data-s="${si}">${sentHtml(arr, false)}</span>` + (si < para.s.length - 1 ? ' ' : '');
     });
     html += '</p>';
   });
@@ -79,12 +87,38 @@ function findPhrase(p, s, t) {
   return sp.find((x) => x[0] === p && x[1] === s && x[2] <= t && t <= x[3]) || null;
 }
 
+function wordHtml(sid) {
+  let h = '';
+  for (const [lemma, pos, form, keys] of book.forms[book.sf[sid]]) {
+    h += `<div class="grp"><div class="hw">${esc(lemma)}</div>`;
+    h += `<div class="meta">${esc(pos)}${form ? ' · ' + esc(form) : ''}</div>`;
+    h += keys.length ? glossHtml(keys) : '<div class="none">辞書に見出しなし</div>';
+    h += '</div>';
+  }
+  return h;
+}
+
+// シートを開き、タップした箇所（anchor）がシートに隠れるなら本文をずらす
+function openSheet(h, anchor) {
+  sheet.innerHTML = h;
+  sheet.hidden = false;
+  sheet.scrollTop = 0;
+  if (!anchor) return;
+  const r = anchor.getBoundingClientRect();
+  const limit = sheet.getBoundingClientRect().top - 12;
+  if (r.bottom > limit) page.scrollTop += r.bottom - limit + r.height;
+}
+
+function clearMarks() {
+  text.querySelectorAll('.w.on, .w.ph, .nt.on').forEach((e) => e.classList.remove('on', 'ph'));
+}
+
 function showWord(w) {
   const sen = w.parentElement;
   const p = +sen.dataset.p, s = +sen.dataset.s, t = +w.dataset.t;
-  const fid = book.sf[book.chunks[cur].p[p].s[s][t]];
+  const sid = book.chunks[cur].p[p].s[s][t];
 
-  text.querySelectorAll('.w.on, .w.ph').forEach((e) => e.classList.remove('on', 'ph'));
+  clearMarks();
   text.querySelectorAll('.sen.cur').forEach((e) => e.classList.remove('cur'));
   sen.classList.add('cur');
   hl = { p, s };
@@ -106,26 +140,25 @@ function showWord(w) {
     h += '</div>';
   }
   w.classList.add('on');
+  openSheet(h + wordHtml(sid), w);
+}
 
-  for (const [lemma, pos, form, keys] of book.forms[fid]) {
-    h += `<div class="grp"><div class="hw">${esc(lemma)}</div>`;
-    h += `<div class="meta">${esc(pos)}${form ? ' · ' + esc(form) : ''}</div>`;
-    h += keys.length ? glossHtml(keys) : '<div class="none">辞書に見出しなし</div>';
-    h += '</div>';
+// 原注。注の中の単語もタップでき、その語の意味を注の下に出す（sid, i がタップした語）
+function showNote(n, sup, sid, i) {
+  let h = `<div class="note"><div class="meta">原注 ${n}</div><div class="ntext" data-n="${n}">`;
+  h += (book.notes[n] || []).map((arr) => sentHtml(arr, true)).join(' ') + '</div></div>';
+  if (sid !== undefined) h += wordHtml(sid);
+  if (sup) {
+    clearMarks();
+    sup.classList.add('on');
   }
-  sheet.innerHTML = h;
-  sheet.hidden = false;
-  sheet.scrollTop = 0;
-
-  // タップした語がシートに隠れるなら本文をずらす
-  const r = w.getBoundingClientRect();
-  const limit = sheet.getBoundingClientRect().top - 12;
-  if (r.bottom > limit) page.scrollTop += r.bottom - limit + r.height;
+  openSheet(h, sup);
+  if (sid !== undefined) sheet.querySelector(`.w[data-i="${i}"]`).classList.add('on');
 }
 
 function closeSheet() {
   sheet.hidden = true;
-  text.querySelectorAll('.w.on, .w.ph').forEach((e) => e.classList.remove('on', 'ph'));
+  clearMarks();
 }
 
 // ---------- 目次 ----------
@@ -150,7 +183,13 @@ document.addEventListener('click', (ev) => {
     if (li) { toc.hidden = true; go(book.toc[+li.dataset.i].c); }
     return;
   }
-  if (sheet.contains(el)) return;
+  if (sheet.contains(el)) {
+    if (el.classList.contains('w') && el.dataset.x) {
+      showNote(el.closest('.ntext').dataset.n, null, +el.dataset.x, el.dataset.i);
+    }
+    return;
+  }
+  if (el.classList.contains('nt')) { showNote(el.dataset.n, el); return; }
   if (el.id === 'navR') { go(cur + 1); return; }
   if (el.id === 'navL') { go(cur - 1); return; }
   if (el.classList.contains('w')) { showWord(el); return; }
@@ -176,4 +215,6 @@ start().catch((e) => { text.innerHTML = `<p class="msg">${esc(String(e))}</p>`; 
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('sw.js').catch(() => { });
+  // 端末の空き容量が減ってもキャッシュを消されないようにする
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist();
 }

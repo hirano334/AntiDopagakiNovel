@@ -35,6 +35,8 @@ PARTICLE_SUFFIXES = ("-то", "-с", "-ка")
 
 WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]")
 NOTE_RE = re.compile(r"\[\d+\]")
+# 原注の参照。本文中では私用領域の文字で囲んだ番号として持ち、文配列にするときに {"n": 番号} に変える
+MARK_RE = re.compile("\ue000(\\d+)\ue001")
 
 
 def norm(s):
@@ -43,8 +45,15 @@ def norm(s):
 
 # ---------- fb2 ----------
 
-def text_of(el):
-    t = "".join(el.itertext())
+def text_of(el, notes=True):
+    def walk(e):
+        if tag(e) == "a" and e.get("type") == "note":
+            num = re.sub(r"\D", "", e.get("{http://www.w3.org/1999/xlink}href", ""))
+            out = f"\ue000{num}\ue001" if notes and num else ""
+        else:
+            out = (e.text or "") + "".join(walk(c) for c in e)
+        return out + (e.tail or "")
+    t = (el.text or "") + "".join(walk(c) for c in el)
     t = NOTE_RE.sub("", t)
     return re.sub(r"\s+", " ", t).strip()
 
@@ -87,7 +96,7 @@ def title_of(sec):
     t = sec.find(NS + "title")
     if t is None:
         return ""
-    return NOTE_RE.sub("", ". ".join(text_of(p) for p in t.iter(NS + "p"))).strip()
+    return ". ".join(text_of(p, notes=False) for p in t.iter(NS + "p"))
 
 
 def parse_fb2(path):
@@ -113,7 +122,17 @@ def parse_fb2(path):
 
     for sec in body.findall(NS + "section"):
         walk(sec, [])
-    return chapters
+
+    notes = {}
+    for b in root.iter(NS + "body"):
+        if b.get("name") != "notes":
+            continue
+        for sec in b.iter(NS + "section"):
+            num = re.sub(r"\D", "", sec.get("id", ""))
+            paras = [text_of(p, notes=False) for p in sec.findall(NS + "p")]
+            if num:
+                notes[num] = [x for x in paras if x]
+    return chapters, notes
 
 
 # ---------- 形態素解析 ----------
@@ -264,19 +283,28 @@ def best_len(b):
 # ---------- 本文 → 文配列 ----------
 
 def sentence_array(text, an):
-    """文を「整数(surfId)＝単語」と「文字列＝その他」の交互の配列にする。"""
-    arr, pos, buf = [], 0, ""
-    for t in tokenize(text):
-        buf += text[pos:t.start]
-        pos = t.stop
-        if WORD_RE.search(t.text):
+    """文を「整数(surfId)＝単語」「文字列＝その他」「{"n": 番号}＝原注の参照」の配列にする。"""
+    arr, buf = [], ""
+    pieces = MARK_RE.split(text)   # [本文, 注番号, 本文, 注番号, …]
+    for i, piece in enumerate(pieces):
+        if i % 2:
             if buf:
                 arr.append(buf)
                 buf = ""
-            arr.append(an.token_id(t.text))
-        else:
-            buf += t.text
-    buf += text[pos:]
+            arr.append({"n": int(piece)})
+            continue
+        pos = 0
+        for t in tokenize(piece):
+            buf += piece[pos:t.start]
+            pos = t.stop
+            if WORD_RE.search(t.text):
+                if buf:
+                    arr.append(buf)
+                    buf = ""
+                arr.append(an.token_id(t.text))
+            else:
+                buf += t.text
+        buf += piece[pos:]
     if buf:
         arr.append(buf)
     return arr
@@ -340,7 +368,7 @@ def find_spans(chunk, an, pm):
                     words.append((ai, norm(an.surf[x]), prev_space))
                     lsets.append(an.lemma_sets[an.sf[x]])
                     prev_space = True
-                else:
+                elif isinstance(x, str):
                     prev_space = x.strip() == ""
             for a, b, key in pm.match(words, lsets):
                 spans.append([pi, si, words[a][0], words[b][0], pm.pid(key)])
@@ -362,7 +390,7 @@ def main():
     an = Analyzer(dic, formof)
     pm = PhraseMatcher(phrases, an.morph)
 
-    chapters = parse_fb2(args.fb2)
+    chapters, notes = parse_fb2(args.fb2)
     if args.chapters:
         chapters = chapters[: args.chapters]
 
@@ -395,6 +423,8 @@ def main():
         "forms": an.forms,
         "dict": {k: dic[k] for k in sorted(an.used_keys)},
         "phr": pm.list,
+        "notes": {k: [sentence_array(s.text, an) for p in v for s in sentenize(p)]
+                  for k, v in notes.items()},
         "spans": spans,
     }
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)

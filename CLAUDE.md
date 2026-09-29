@@ -19,7 +19,8 @@
 ## 対象環境
 - Android の Chrome のみ。PWA としてホーム画面に追加して使う。
 - **完全オフラインで動作すること**（Service Worker でアプリ本体と本のデータをすべてキャッシュする）。
-- ホスティングは GitHub Pages を想定（PWA のインストールには HTTPS が必要なため）。
+- 外部へのホスティングはしない。PC から USB 経由（`adb reverse`）で `localhost` として配信してインストールする（`serve.sh`）。
+  Service Worker は localhost なら HTTP でも動くため、HTTPS は不要。更新時だけ再接続する。
 
 ## 構成
 ```
