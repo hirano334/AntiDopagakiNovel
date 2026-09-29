@@ -31,7 +31,27 @@ PHRASE_MAX = 5
 # 語の意味の足し算にすぎず、成句として出すとかえって邪魔なもの
 PHRASE_STOP = {"что это", "и так", "и то", "даже так", "все вместе", "не так", "а то", "да и"}
 # 強調の小詞。辞書にない「он-то」などは本体の語で引く
-PARTICLE_SUFFIXES = ("-то", "-с", "-ка")
+PARTICLE_SUFFIXES = ("-то", "-с", "-ка", "-де", "-таки")
+STUTTER_RE = re.compile(r"^([а-яё])-(?=\1)")          # в-врешь, н-не
+STRETCH_RE = re.compile(r"([аеёиоуыэюя])(?:-\1)+")     # да-а-а
+
+
+def spelling_variants(key):
+    """辞書に引けない表記を、辞書に引ける形に戻す候補を (語, 注記) で返す。"""
+    for suf in PARTICLE_SUFFIXES:
+        if key.endswith(suf) and len(key) > len(suf):
+            yield key[: -len(suf)], f"＋{suf}"
+    if "-" not in key:
+        return
+    k = key
+    while STUTTER_RE.match(k):
+        k = STUTTER_RE.sub("", k)
+    if k != key:
+        yield k, "（どもりの表記）"
+    k2 = STRETCH_RE.sub(r"\1", k)
+    if k2 != k:
+        yield k2, "（引き伸ばしの表記）"
+    yield k2.replace("-", ""), "（区切った表記）"
 
 WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]")
 NOTE_RE = re.compile(r"\[\d+\]")
@@ -169,11 +189,12 @@ class Analyzer:
             self.form_ids[key] = fid
             groups, lemmas = self.analyze(key)
             if not any(g[3] for g in groups):
-                for suf in PARTICLE_SUFFIXES:
-                    if key.endswith(suf) and len(key) > len(suf):
-                        groups, lemmas = self.analyze(key[: -len(suf)])
-                        for g in groups:
-                            g[2] = (g[2] + f" ＋{suf}").strip()
+                for variant, label in spelling_variants(key):
+                    g2, l2 = self.analyze(variant)
+                    if any(g[3] for g in g2):
+                        for g in g2:
+                            g[2] = (g[2] + " " + label).strip()
+                        groups, lemmas = g2, l2
                         break
             self.forms.append(groups)
             self.lemma_sets.append(lemmas)

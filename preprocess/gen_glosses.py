@@ -11,9 +11,10 @@
 """
 import argparse
 import json
+import os
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import anthropic
@@ -21,6 +22,8 @@ import anthropic
 ROOT = Path(__file__).resolve().parent.parent
 BOOK = ROOT / "app/books/karamazov.json"
 OUT = ROOT / "data/llm_glosses.json"
+# API キーはリポジトリの外、本人だけが読めるファイルに置く（誤ってコミットしないように）
+ENV_FILE = Path.home() / ".config/karamazov-reader/env"
 
 # 辞書にない古語・方言などが相手なので Haiku より Sonnet。思考は切って費用を抑える（全件で約2ドルの見込み）
 MODEL = "claude-sonnet-5-5"
@@ -29,6 +32,7 @@ BATCH = 40
 MAX_CONTEXTS = 2
 CTX_WINDOW = 150                  # 文脈は語の前後この字数だけ送る
 ROMAN_RE = re.compile(r"^[ivxlc]+$")
+CYRILLIC_RE = re.compile(r"[а-яё]")
 
 SYSTEM = """You help a Japanese learner (intermediate Russian, about CEFR B1) read Dostoevsky's \
 "The Brothers Karamazov" in the original. The reader's dictionary (English Wiktionary) has no entry \
@@ -88,39 +92,63 @@ def snippet(text, words):
     return ("…" if a else "") + text[a:b] + ("…" if b < len(text) else "")
 
 
+def sentences(book):
+    for c in book["chunks"]:
+        for p in c["p"]:
+            yield from p["s"]
+
+
 def collect(book):
-    """辞書キーのない候補を見出し語ごとに集め、表層形と文脈の文を付ける。"""
-    missing = {}   # 正規化した見出し語 → {"lemma", "forms": set, "ctx": []}
+    """辞書キーのない候補を見出し語ごとに集め、表層形と文脈の文を付ける。
+
+    次のものは送らない（生成しても役に立たないか、誤解析なので）:
+    - ラテン文字の語（本文中のフランス語・ドイツ語・ラテン語）
+    - 小文字で一度も出てこず、文中で大文字で出てくる語（人名・地名。Хохлакова → хохлаковый のような誤解析）
+    - 同じ表層形の別の解析候補で辞書が引けている語（その候補は誤解析で、読者には既に語義が出ている）
+    """
+    mid_cap, lower = Counter(), Counter()   # surfId → 文中で大文字 / 小文字で出た回数
+    for arr in sentences(book):
+        words = [x for x in arr if isinstance(x, int)]
+        for j, x in enumerate(words):
+            w = book["surf"][x]
+            if w[0].islower():
+                lower[x] += 1
+            elif j > 0:
+                mid_cap[x] += 1
+
+    missing = {}   # 正規化した見出し語 → {"lemma", "sids": set, "ctx": []}
     for sid, fid in enumerate(book["sf"]):
-        for lemma, pos, _form, keys in book["forms"][fid]:
-            if keys or "固有名詞" in pos:
-                continue
+        groups = book["forms"][fid]
+        if any(g[3] for g in groups):
+            continue
+        for lemma, pos, _form, _keys in groups:
             key = norm(base_lemma(lemma))
-            if ROMAN_RE.match(key) or len(key) < 2:
+            if "固有名詞" in pos or not CYRILLIC_RE.search(key) or ROMAN_RE.match(key) or len(key) < 2:
                 continue
             m = missing.setdefault(key, {"lemma": base_lemma(lemma), "sids": set(), "ctx": []})
             m["sids"].add(sid)
+    for key in [k for k, m in missing.items()
+                if not any(lower[s] for s in m["sids"]) and any(mid_cap[s] for s in m["sids"])]:
+        del missing[key]
 
     by_sid = defaultdict(list)
     for key, m in missing.items():
         for sid in m["sids"]:
             by_sid[sid].append(key)
-    for c in book["chunks"]:
-        for p in c["p"]:
-            for arr in p["s"]:
-                hits = [k for x in arr if isinstance(x, int) for k in by_sid.get(x, ())]
-                if not hits:
-                    continue
-                text = "".join(book["surf"][x] if isinstance(x, int) else x
-                               for x in arr if not isinstance(x, dict))
-                for k in hits:
-                    ctx = missing[k]["ctx"]
-                    if len(ctx) >= MAX_CONTEXTS:
-                        continue
-                    snip = snippet(text, [book["surf"][x] for x in arr
-                                          if isinstance(x, int) and k in by_sid.get(x, ())])
-                    if snip not in ctx:
-                        ctx.append(snip)
+    for arr in sentences(book):
+        hits = [k for x in arr if isinstance(x, int) for k in by_sid.get(x, ())]
+        if not hits:
+            continue
+        text = "".join(book["surf"][x] if isinstance(x, int) else x
+                       for x in arr if not isinstance(x, dict))
+        for k in hits:
+            ctx = missing[k]["ctx"]
+            if len(ctx) >= MAX_CONTEXTS:
+                continue
+            snip = snippet(text, [book["surf"][x] for x in arr
+                                  if isinstance(x, int) and k in by_sid.get(x, ())])
+            if snip not in ctx:
+                ctx.append(snip)
     for m in missing.values():
         m["forms"] = sorted({book["surf"][s] for s in m["sids"]})
     return missing
@@ -150,6 +178,18 @@ def ask(client, items):
     return json.loads(text)["entries"], cost
 
 
+def load_env():
+    """ENV_FILE の KEY=VALUE を環境変数に読み込む。既に設定されている環境変数が優先。"""
+    if not ENV_FILE.exists():
+        return
+    for line in ENV_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            if v.strip():
+                os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="送る見出し語の最大数（試し用）")
@@ -164,6 +204,9 @@ def main():
         todo = todo[: args.limit]
     print(f"辞書にない見出し語={len(missing)} 生成済み={len(done)} 今回={len(todo)}", file=sys.stderr)
 
+    load_env()
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        sys.exit(f"API キーがない。{ENV_FILE} に ANTHROPIC_API_KEY=... を書くこと")
     client = anthropic.Anthropic()
     spent = 0.0
     for i in range(0, len(todo), BATCH):
