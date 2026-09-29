@@ -16,6 +16,14 @@ OUT = ROOT / "data/work"
 
 MAX_SENSES = 5
 MAX_GLOSS = 120
+# これらのタグを持つ form-of は活用形（「生格単数」など）。語義としては捨てて、見出し語への参照だけ残す。
+# 指小形（минутка）や動詞からの派生名詞（родитель）も form-of になっているが、これらは語義を残す。
+INFLECTION_TAGS = {
+    "nominative", "genitive", "dative", "accusative", "instrumental", "prepositional",
+    "locative", "vocative", "partitive", "singular", "plural", "participle", "imperative",
+    "past", "present", "future", "first-person", "second-person", "third-person", "short-form",
+}
+SKIP_POS = {"character", "letter", "symbol", "romanization"}
 
 
 def norm(s):
@@ -28,24 +36,27 @@ def main():
     with open(SRC, encoding="utf-8") as f:
         for n, line in enumerate(f):
             e = json.loads(line)
-            if e.get("lang_code") != "ru" or not e.get("word"):
+            if e.get("lang_code") != "ru" or not e.get("word") or e.get("pos") in SKIP_POS:
                 continue
             key = norm(e["word"])
             pos = e.get("pos", "")
             glosses = []
             for s in e.get("senses", []):
-                if "form_of" in s or "form-of" in s.get("tags", []):
-                    for fo in s.get("form_of", []):
-                        lem = norm(fo.get("word", ""))
-                        if lem and lem != key:
-                            lst = formof.setdefault(key, [])
-                            if lem not in lst:
-                                lst.append(lem)
+                tags = set(s.get("tags", []))
+                for fo in s.get("form_of", []):
+                    lem = norm(fo.get("word", ""))
+                    if lem and lem != key:
+                        lst = formof.setdefault(key, [])
+                        if lem not in lst:
+                            lst.append(lem)
+                if "form-of" in tags and tags & INFLECTION_TAGS:
                     continue
                 g = s.get("glosses")
                 if not g:
                     continue
                 text = g[-1]
+                if text.startswith("The name of the Cyrillic"):
+                    continue
                 if len(text) > MAX_GLOSS:
                     text = text[: MAX_GLOSS - 1] + "…"
                 if text not in glosses:

@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 WORK = ROOT / "data/work"
 NS = "{http://www.gribuser.ru/xml/fictionbook/2.0}"
 
-TARGET = 350          # チャンクの目安文字数
+TARGET = 450          # チャンクの目安文字数
 MAX_GROUPS = 3        # 1語に表示する解析候補（見出し語×品詞）の最大数
 MIN_SCORE = 0.05      # これ未満の候補は捨てる（先頭候補は残す）
 PHRASE_MAX = 5
@@ -128,6 +128,18 @@ class Analyzer:
         self.lemma_sets = []   # formId → 見出し語（正規化）の集合。成句照合用
         self.used_keys = set()
         self.covered = []      # formId → 辞書に何かヒットしたか
+        self.surf_ids = {}     # 本文の表記（大文字小文字そのまま）→ surfId
+        self.surf = []         # surfId → 表記
+        self.sf = []           # surfId → formId
+
+    def token_id(self, word):
+        sid = self.surf_ids.get(word)
+        if sid is None:
+            sid = len(self.surf)
+            self.surf_ids[word] = sid
+            self.surf.append(word)
+            self.sf.append(self.form_id(word))
+        return sid
 
     def form_id(self, word):
         key = word.lower()
@@ -138,7 +150,7 @@ class Analyzer:
             groups, lemmas = self.analyze(key)
             if not any(g[3] for g in groups):
                 for suf in PARTICLE_SUFFIXES:
-                    if key.endswith(suf) and len(key) > len(suf) + 1:
+                    if key.endswith(suf) and len(key) > len(suf):
                         groups, lemmas = self.analyze(key[: -len(suf)])
                         for g in groups:
                             g[2] = (g[2] + f" ＋{suf}").strip()
@@ -252,7 +264,7 @@ def best_len(b):
 # ---------- 本文 → 文配列 ----------
 
 def sentence_array(text, an):
-    """文を「整数(formId)＝単語」と「文字列＝その他」の交互の配列にする。"""
+    """文を「整数(surfId)＝単語」と「文字列＝その他」の交互の配列にする。"""
     arr, pos, buf = [], 0, ""
     for t in tokenize(text):
         buf += text[pos:t.start]
@@ -261,7 +273,7 @@ def sentence_array(text, an):
             if buf:
                 arr.append(buf)
                 buf = ""
-            arr.append(an.form_id(t.text))
+            arr.append(an.token_id(t.text))
         else:
             buf += t.text
     buf += text[pos:]
@@ -299,6 +311,8 @@ def chunk_chapter(ci, paras, an):
         lens = [len(s) for s in sents]
         plen = sum(lens)
         if kind == "h":
+            if any(x["k"] != "h" for x in cur):
+                flush()
             cur.append({"k": "h", "s": [sentence_array(" ".join(sents), an)]})
             continue
         if cur_len and cur_len + plen > TARGET:
@@ -323,8 +337,8 @@ def find_spans(chunk, an, pm):
             words, lsets, prev_space = [], [], True
             for ai, x in enumerate(arr):
                 if isinstance(x, int):
-                    words.append((ai, norm(an.forms_key[x]), prev_space))
-                    lsets.append(an.lemma_sets[x])
+                    words.append((ai, norm(an.surf[x]), prev_space))
+                    lsets.append(an.lemma_sets[an.sf[x]])
                     prev_space = True
                 else:
                     prev_space = x.strip() == ""
@@ -358,7 +372,6 @@ def main():
         chunks.extend(chunk_chapter(ci, ch["paras"], an))
         print(f"{ci + 1}/{len(chapters)} {ch['title'][:50]}", file=sys.stderr)
 
-    an.forms_key = list(an.form_ids)
     spans = {}
     tok_count, miss = 0, Counter()
     for i, c in enumerate(chunks):
@@ -370,13 +383,15 @@ def main():
                 for x in arr:
                     if isinstance(x, int):
                         tok_count += 1
-                        if not an.covered[x]:
-                            miss[an.forms_key[x]] += 1
+                        if not an.covered[an.sf[x]]:
+                            miss[an.surf[x].lower()] += 1
 
     book = {
         "title": "Братья Карамазовы",
         "toc": toc,
         "chunks": chunks,
+        "surf": an.surf,
+        "sf": an.sf,
         "forms": an.forms,
         "dict": {k: dic[k] for k in sorted(an.used_keys)},
         "phr": pm.list,
