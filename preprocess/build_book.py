@@ -220,7 +220,7 @@ class Analyzer:
         if not found:
             k = norm(p.normal_form)
             e = self.llm.get(k)
-            if e and e["g"]:
+            if e and (e["g"] or e["note"]):   # 語義が空でも、正しい見出し語などの補足は役に立つ
                 self.dic["ai:" + k] = [{"pos": e["pos"], "g": e["g"], "note": e["note"], "ai": 1}]
                 found = ["ai:" + k]
         return found[:2]
