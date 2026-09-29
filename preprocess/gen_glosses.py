@@ -22,9 +22,12 @@ ROOT = Path(__file__).resolve().parent.parent
 BOOK = ROOT / "app/books/karamazov.json"
 OUT = ROOT / "data/llm_glosses.json"
 
-MODEL = "claude-opus-5-5"
+# 辞書にない古語・方言などが相手なので Haiku より Sonnet。思考は切って費用を抑える（全件で約2ドルの見込み）
+MODEL = "claude-sonnet-5-5"
+PRICE_IN, PRICE_OUT = 2.0, 10.0   # ドル / 100万トークン
 BATCH = 40
 MAX_CONTEXTS = 2
+CTX_WINDOW = 150                  # 文脈は語の前後この字数だけ送る
 ROMAN_RE = re.compile(r"^[ivxlc]+$")
 
 SYSTEM = """You help a Japanese learner (intermediate Russian, about CEFR B1) read Dostoevsky's \
@@ -76,6 +79,15 @@ def base_lemma(display):
     return display.split(" ← ")[-1]
 
 
+def snippet(text, words):
+    """文が長いときは、その語の前後 CTX_WINDOW 字だけにする。"""
+    if len(text) <= CTX_WINDOW * 2:
+        return text
+    i = max(0, text.find(words[0]) if words else 0)
+    a, b = max(0, i - CTX_WINDOW), min(len(text), i + CTX_WINDOW)
+    return ("…" if a else "") + text[a:b] + ("…" if b < len(text) else "")
+
+
 def collect(book):
     """辞書キーのない候補を見出し語ごとに集め、表層形と文脈の文を付ける。"""
     missing = {}   # 正規化した見出し語 → {"lemma", "forms": set, "ctx": []}
@@ -103,8 +115,12 @@ def collect(book):
                                for x in arr if not isinstance(x, dict))
                 for k in hits:
                     ctx = missing[k]["ctx"]
-                    if len(ctx) < MAX_CONTEXTS and text not in ctx:
-                        ctx.append(text[:400])
+                    if len(ctx) >= MAX_CONTEXTS:
+                        continue
+                    snip = snippet(text, [book["surf"][x] for x in arr
+                                          if isinstance(x, int) and k in by_sid.get(x, ())])
+                    if snip not in ctx:
+                        ctx.append(snip)
     for m in missing.values():
         m["forms"] = sorted({book["surf"][s] for s in m["sids"]})
     return missing
@@ -121,20 +137,23 @@ def ask(client, items):
         max_tokens=16000,
         betas=["server-side-fallback-2026-07-01"],
         fallbacks="default",
+        thinking={"type": "between_tools"},   # Sonnet 5.5 で思考を切る指定
         output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
         system=SYSTEM,
         messages=[{"role": "user", "content": "\n".join(lines)}],
     )
+    cost = (resp.usage.input_tokens * PRICE_IN + resp.usage.output_tokens * PRICE_OUT) / 1e6
     if resp.stop_reason != "end_turn":
         print(f"  stop_reason={resp.stop_reason}、このまとまりはとばす", file=sys.stderr)
-        return []
+        return [], cost
     text = next(b.text for b in resp.content if b.type == "text")
-    return json.loads(text)["entries"]
+    return json.loads(text)["entries"], cost
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="送る見出し語の最大数（試し用）")
+    ap.add_argument("--budget", type=float, default=3.0, help="この金額（ドル）に達したら止める")
     args = ap.parse_args()
 
     book = json.load(open(BOOK, encoding="utf-8"))
@@ -146,10 +165,15 @@ def main():
     print(f"辞書にない見出し語={len(missing)} 生成済み={len(done)} 今回={len(todo)}", file=sys.stderr)
 
     client = anthropic.Anthropic()
+    spent = 0.0
     for i in range(0, len(todo), BATCH):
+        if spent >= args.budget:
+            print(f"  予算 {args.budget} ドルに達したので止める（再実行で続きから）", file=sys.stderr)
+            break
         items = todo[i:i + BATCH]
         try:
-            entries = ask(client, items)
+            entries, cost = ask(client, items)
+            spent += cost
         except anthropic.APIStatusError as e:
             print(f"  API エラー {e.status_code}: {e.message}、ここで止める（再実行で続きから）", file=sys.stderr)
             break
@@ -161,7 +185,7 @@ def main():
         # 1リクエストごとに保存する（途中で止まっても払った分を失わない）
         with open(OUT, "w", encoding="utf-8") as f:
             json.dump(done, f, ensure_ascii=False, indent=1, sort_keys=True)
-        print(f"  {min(i + BATCH, len(todo))}/{len(todo)}", file=sys.stderr)
+        print(f"  {min(i + BATCH, len(todo))}/{len(todo)}  累計 {spent:.2f} ドル", file=sys.stderr)
 
 
 if __name__ == "__main__":
