@@ -2,6 +2,9 @@
 
 const BOOK = 'karamazov';
 const POS_KEY = 'pos:' + BOOK;
+const RUBY_KEY = 'ruby:' + BOOK;
+// ルビを付ける語彙レベルの下限（book.lv の値。3=B1 … 6=C2、7=リスト外）。0 はルビなし
+const RUBY_CHOICES = [[0, 'なし'], [3, 'B1〜'], [4, 'B2〜'], [5, 'C1〜'], [7, 'リスト外のみ']];
 
 const $ = (id) => document.getElementById(id);
 const page = $('page'), text = $('text'), sheet = $('sheet'), toc = $('toc'), where = $('where');
@@ -9,6 +12,7 @@ const page = $('page'), text = $('text'), sheet = $('sheet'), toc = $('toc'), wh
 let book = null;
 let cur = 0;          // 表示中のチャンク
 let hl = null;        // ハイライトする文 {p, s}
+let rubyMin = 3;
 
 function loadPos() {
   try { return JSON.parse(localStorage.getItem(POS_KEY)) || { c: 0, p: 0, s: 0 }; }
@@ -18,18 +22,26 @@ function savePos(p, s) {
   try { localStorage.setItem(POS_KEY, JSON.stringify({ c: cur, p, s })); } catch (e) { }
 }
 
+function loadRuby() {
+  try { const v = localStorage.getItem(RUBY_KEY); return v === null ? 3 : +v; } catch (e) { return 3; }
+}
+
 function esc(s) {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
 // 文の配列の要素は「数値＝単語（surfId）」「文字列＝空白・句読点」「{n}＝原注の参照」。
 // 本文の単語は文中の位置 data-t、原注の中の単語は surfId そのもの data-x で識別する。
-function sentHtml(arr, inNote) {
+// ruby は本文のときだけ渡す。文中の位置 → その箇所の訳語
+function sentHtml(arr, inNote, ruby) {
   let h = '';
   arr.forEach((x, ti) => {
     if (typeof x === 'number') {
+      const rt = ruby && rubyMin && +book.lv[book.sf[x]] >= rubyMin ? ruby[ti] : null;
+      if (rt) h += '<ruby>';
       h += inNote ? `<span class="w" data-x="${x}" data-i="${ti}">` : `<span class="w" data-t="${ti}">`;
       h += esc(book.surf[x]) + '</span>';
+      if (rt) h += `<rt lang="ja">${esc(rt)}</rt></ruby>`;
     } else if (typeof x === 'string') {
       h += esc(x);
     } else if (!inNote) {
@@ -41,21 +53,26 @@ function sentHtml(arr, inNote) {
 
 function render() {
   const ch = book.chunks[cur];
+  const t = book.toc[ch.ch];
+  const ruby = {};   // "段落,文" → {文中の位置: 訳語}
+  for (const [p, s, ti, id] of book.rb[cur] || []) (ruby[p + ',' + s] ||= {})[ti] = book.rbt[id];
   let html = '';
+  // 章の最初のチャンクには、その章のあらすじを出す
+  if (t.s && t.c === cur) html += `<div class="sum" lang="ja">${esc(t.s).replace(/\n/g, '<br>')}</div>`;
   ch.p.forEach((para, pi) => {
     html += `<p class="k-${para.k}${para.c ? ' c' : ''}">`;
     para.s.forEach((arr, si) => {
-      html += `<span class="sen" data-p="${pi}" data-s="${si}">${sentHtml(arr, false)}</span>` + (si < para.s.length - 1 ? ' ' : '');
+      html += `<span class="sen" data-p="${pi}" data-s="${si}">${sentHtml(arr, false, ruby[pi + ',' + si] || {})}</span>` + (si < para.s.length - 1 ? ' ' : '');
     });
     html += '</p>';
   });
   text.innerHTML = html;
+  text.classList.toggle('rb', rubyMin > 0);
   if (hl) {
     const el = text.querySelector(`.sen[data-p="${hl.p}"][data-s="${hl.s}"]`);
     if (el) el.classList.add('cur');
   }
   page.scrollTop = 0;
-  const t = book.toc[ch.ch];
   where.textContent = `${t.t} · ${cur + 1}/${book.chunks.length}`;
 }
 
@@ -70,12 +87,17 @@ function go(n) {
 
 // ---------- 辞書シート ----------
 
+// 語義の出どころ。辞書にない語を生成したものは「AI生成」、Wiktionary の英語語義を和訳したものは「AI訳」
+function aiTag(e) {
+  return e.ai ? '<span class="ai">AI生成</span>' : e.ja ? '<span class="ai">AI訳</span>' : '';
+}
+
 function glossHtml(keys) {
   let h = '';
   for (const k of keys) {
     for (const e of book.dict[k] || []) {
       h += `<div><span class="pos">${esc(e.pos)}</span>${k !== keys[0] ? esc(k.replace(/^ai:/, '')) : ''}`;
-      h += e.ai ? '<span class="ai">AI生成</span></div>' : '</div>';
+      h += aiTag(e) + '</div>';
       if (e.note) h += `<div class="note-ai">${esc(e.note)}</div>`;
       h += '<ol>' + e.g.map((g) => `<li>${esc(g)}</li>`).join('') + '</ol>';
     }
@@ -122,7 +144,7 @@ function clearMarks() {
 }
 
 function showWord(w) {
-  const sen = w.parentElement;
+  const sen = w.closest('.sen');
   const p = +sen.dataset.p, s = +sen.dataset.s, t = +w.dataset.t;
   const sid = book.chunks[cur].p[p].s[s][t];
 
@@ -142,7 +164,7 @@ function showWord(w) {
     }
     h += `<div class="phr"><div class="hw">${esc(ph.t)}</div>`;
     for (const e of ph.e) {
-      h += `<div><span class="pos">${esc(e.pos)}</span></div><ol>` +
+      h += `<div><span class="pos">${esc(e.pos)}</span>${aiTag(e)}</div><ol>` +
         e.g.map((g) => `<li>${esc(g)}</li>`).join('') + '</ol>';
     }
     h += '</div>';
@@ -173,6 +195,8 @@ function closeSheet() {
 
 function openToc() {
   const now = book.chunks[cur].ch;
+  $('rubysel').innerHTML = 'ルビ ' + RUBY_CHOICES
+    .map(([v, label]) => `<button type="button" data-r="${v}"${v === rubyMin ? ' class="now"' : ''}>${label}</button>`).join('');
   toc.querySelector('ol').innerHTML = book.toc
     .map((t, i) => `<li data-i="${i}"${i === now ? ' class="now"' : ''}>${esc(t.t)}</li>`).join('');
   toc.hidden = false;
@@ -184,10 +208,17 @@ function openToc() {
 
 document.addEventListener('click', (ev) => {
   if (!book) return;
-  const el = ev.target;
+  let el = ev.target;
+  if (el.tagName === 'RT') el = el.previousElementSibling;   // ルビをタップしても、その語を引く
   if (!toc.hidden) {
     const li = el.closest('li[data-i]');
     if (li) { toc.hidden = true; go(book.toc[+li.dataset.i].c); }
+    else if (el.dataset.r) {
+      rubyMin = +el.dataset.r;
+      try { localStorage.setItem(RUBY_KEY, rubyMin); } catch (e) { }
+      toc.hidden = true;
+      render();
+    }
     else if (el === where) toc.hidden = true;
     return;
   }
@@ -213,6 +244,7 @@ document.addEventListener('click', (ev) => {
 async function start() {
   const res = await fetch(`books/${BOOK}.json`);
   book = await res.json();
+  rubyMin = loadRuby();
   const pos = loadPos();
   cur = Math.min(pos.c, book.chunks.length - 1);
   hl = { p: pos.p, s: pos.s };

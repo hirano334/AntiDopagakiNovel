@@ -106,3 +106,18 @@ html, body {
 }
 #sheet .ai { margin-left: 8px; font-size: 11px; color: var(--dim); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
 #sheet .note-ai { color: var(--dim); font-size: 13px; margin: 2px 0; }
+
+/* ルビ（箇所ごとの訳語）。行間を広げて、ルビが上の行に重ならないようにする */
+#text.rb { line-height: 2.1; }
+#text ruby { ruby-align: center; }
+#text rt { font: 11px/1.2 system-ui, sans-serif; color: var(--dim); font-style: normal; }
+#text .sum {
+  font: 13px/1.6 system-ui, sans-serif; color: var(--dim);
+  border-left: 2px solid var(--line); padding-left: 10px; margin: 4px 0 14px;
+}
+#rubysel { padding: 10px 18px; border-bottom: 1px solid var(--line); color: var(--dim); font-size: 13px; }
+#rubysel button {
+  background: none; color: var(--fg); font: inherit;
+  border: 1px solid var(--line); border-radius: 4px; padding: 8px 9px; margin: 2px 0 2px 4px;
+}
+#rubysel button.now { color: var(--accent); border-color: var(--accent); }

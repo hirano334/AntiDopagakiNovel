@@ -7,6 +7,7 @@
   python preprocess/build_book.py --chapters 2   # 先頭2章だけ（動作確認用）
 """
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -28,6 +29,12 @@ TARGET = 450          # チャンクの目安文字数
 MAX_GROUPS = 3        # 1語に表示する解析候補（見出し語×品詞）の最大数
 MIN_SCORE = 0.05      # これ未満の候補は捨てる（先頭候補は残す）
 PHRASE_MAX = 5
+LEVELS = {"A1": 1, "A2": 2, "B1": 3, "B2": 4, "C1": 5, "C2": 6}
+UNLISTED = 7          # KELLY のリストにない語
+# この本にこの回数以上出る語は、レベルによらず A2 扱いにしてルビの対象から外す。
+# KELLY は же, вдруг が B1 だったり、完了体（спросить）や古い語（барин）が抜けていたりして、
+# そのままだと毎ページ同じ語にルビが付く。何十回も出る語は辞書を一度引けば足りる
+FREQUENT = 40
 # 語の意味の足し算にすぎず、成句として出すとかえって邪魔なもの
 PHRASE_STOP = {"что это", "и так", "и то", "даже так", "все вместе", "не так", "а то", "да и"}
 # 強調の小詞。辞書にない「он-то」などは本体の語で引く
@@ -54,6 +61,7 @@ def spelling_variants(key):
     yield k2.replace("-", ""), "（区切った表記）"
 
 WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]")
+CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 NOTE_RE = re.compile(r"\[\d+\]")
 # 原注の参照。本文中では私用領域の文字で囲んだ番号として持ち、文配列にするときに {"n": 番号} に変える
 MARK_RE = re.compile("\ue000(\\d+)\ue001")
@@ -61,6 +69,14 @@ MARK_RE = re.compile("\ue000(\\d+)\ue001")
 
 def norm(s):
     return s.lower().replace("ё", "е")
+
+
+def chunk_key(chunk, surf):
+    """チャンクの本文から作る識別子。生成済みのルビを、チャンク番号がずれても同じ本文に対応づける。"""
+    text = "\n".join("".join(surf[x] if isinstance(x, int) else x
+                              for arr in para["s"] for x in arr if not isinstance(x, dict))
+                     for para in chunk["p"])
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
 # ---------- fb2 ----------
@@ -168,6 +184,7 @@ class Analyzer:
         self.lemma_sets = []   # formId → 見出し語（正規化）の集合。成句照合用
         self.used_keys = set()
         self.covered = []      # formId → 辞書に何かヒットしたか
+        self.lvkey = []        # formId → 語彙レベルを引く見出し語（固有名詞・ラテン文字の語は None）
         self.surf_ids = {}     # 本文の表記（大文字小文字そのまま）→ surfId
         self.surf = []         # surfId → 表記
         self.sf = []           # surfId → formId
@@ -199,6 +216,8 @@ class Analyzer:
             self.forms.append(groups)
             self.lemma_sets.append(lemmas)
             self.covered.append(any(g[3] for g in groups))
+            lemma, pos = groups[0][0].split(" ← ")[-1], groups[0][1]
+            self.lvkey.append(None if "固有名詞" in pos or not CYRILLIC_RE.search(lemma) else norm(lemma))
         return fid
 
     def lookup_keys(self, p, surface):
@@ -403,6 +422,43 @@ def find_spans(chunk, an, pm):
     return spans
 
 
+def load_json(path, default):
+    return json.load(open(path, encoding="utf-8")) if path.exists() else default
+
+
+def levels_of(an, chunks):
+    """formId 順の語彙レベルの数字列。0=対象外、1〜6=A1〜C2、7=リスト外。"""
+    kelly = {}
+    for line in open(ROOT / "data/raw/kelly_ru.tsv", encoding="utf-8"):
+        w, lv = line.rstrip("\n").split("\t")
+        kelly[w] = LEVELS[lv]
+    count = Counter()
+    for c in chunks:
+        for para in c["p"]:
+            for arr in para["s"]:
+                count.update(an.lvkey[an.sf[x]] for x in arr if isinstance(x, int))
+
+    def level(key):
+        if key is None:
+            return 0
+        lv = kelly.get(key, UNLISTED)
+        return 2 if lv > 2 and count[key] >= FREQUENT else lv
+    return "".join(str(level(k)) for k in an.lvkey)
+
+
+def japanese(prefix, key, entries, ja):
+    """gen_ja.py で和訳した語義があれば差し替える。ないエントリは英語のまま。"""
+    out = []
+    for i, e in enumerate(entries):
+        j = ja.get(f"{prefix}{key}#{i}")
+        if j and j["g"]:
+            e = {**e, "g": j["g"], "ja": 1}
+            if e.get("note"):
+                e["note"] = j.get("note") or e["note"]
+        out.append(e)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--fb2", default=str(ROOT / "data/raw/Dostoevskiyi_F._Bratya_Karamazovyi.fb2"))
@@ -444,6 +500,25 @@ def main():
                         if not an.covered[an.sf[x]]:
                             miss[an.surf[x].lower()] += 1
 
+    notes = {k: [sentence_array(s.text, an) for p in v for s in sentenize(p)] for k, v in notes.items()}
+    lv = levels_of(an, chunks)
+
+    ja = load_json(ROOT / "data/ja_dict.json", {})
+    for i, text in load_json(ROOT / "data/ja_summary.json", {}).items():
+        if int(i) < len(toc):
+            toc[int(i)]["s"] = text
+
+    # 箇所ごとのルビ。本文が一致するチャンクの分だけ取り込む
+    ruby = load_json(ROOT / "data/ja_ruby.json", {})
+    rb, rbt_ids, n_ruby, n_target = {}, {}, 0, 0
+    for i, c in enumerate(chunks):
+        n_target += sum(1 for para in c["p"] for arr in para["s"] for x in arr
+                        if isinstance(x, int) and lv[an.sf[x]] >= "3")
+        rows = ruby.get(chunk_key(c, an.surf))
+        if rows:
+            rb[i] = [[p, s, t, rbt_ids.setdefault(g, len(rbt_ids))] for p, s, t, g in rows]
+            n_ruby += len(rows)
+
     book = {
         "title": "Братья Карамазовы",
         "toc": toc,
@@ -451,10 +526,12 @@ def main():
         "surf": an.surf,
         "sf": an.sf,
         "forms": an.forms,
-        "dict": {k: dic[k] for k in sorted(an.used_keys)},
-        "phr": pm.list,
-        "notes": {k: [sentence_array(s.text, an) for p in v for s in sentenize(p)]
-                  for k, v in notes.items()},
+        "lv": lv,
+        "dict": {k: japanese("", k, dic[k], ja) for k in sorted(an.used_keys)},
+        "phr": [{"t": p["t"], "e": japanese("phr:", p["t"], p["e"], ja)} for p in pm.list],
+        "rb": rb,
+        "rbt": list(rbt_ids),
+        "notes": notes,
         "spans": spans,
     }
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -467,6 +544,13 @@ def main():
           f"辞書見出し={len(book['dict'])} 成句={len(pm.list)}種/{n_spans}箇所")
     print(f"辞書ヒット率={(1 - n_miss / max(tok_count, 1)) * 100:.1f}%  "
           f"サイズ={Path(args.out).stat().st_size / 1e6:.1f}MB")
+    n_ja = sum(1 for v in book["dict"].values() for e in v if e.get("ja"))
+    by_lv = Counter(lv[an.sf[x]] for c in chunks for para in c["p"] for arr in para["s"]
+                    for x in arr if isinstance(x, int))
+    print("レベル別トークン数（0=対象外 1〜6=A1〜C2 7=リスト外）:",
+          " ".join(f"{k}={by_lv[k]}" for k in sorted(by_lv)))
+    print(f"ルビ={n_ruby}/{n_target}箇所  和訳済みの語義={n_ja}/{sum(len(v) for v in book['dict'].values())}  "
+          f"あらすじ={sum(1 for t in toc if 's' in t)}/{len(toc)}章")
     print("未ヒット上位:", " ".join(f"{w}({n})" for w, n in miss.most_common(50)))
 
 
