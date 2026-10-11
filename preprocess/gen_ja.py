@@ -79,12 +79,14 @@ SYS_SUMMARY = READER + """Before each chapter the reader sees a short Japanese o
 that they know where the chapter is heading and can guess meanings from context.
 
 You get the full Russian text of one chapter. Write the orientation in Japanese:
-- 2 or 3 short lines (about 60-110 characters in total), plain である/だ style.
-- Convey the DIRECTION of the chapter, not its content: who is on stage, what the scene is \
-about, what kind of talk or mood to expect (e.g. a quarrel, a confession, a theological debate, \
-a courtroom speech).
-- Do not retell events and do not reveal how the chapter turns out.
+- It must fit in 2-3 lines on a phone: ONE or TWO short sentences, 70 characters at most in \
+total. Plain である/だ style.
+- Convey only the DIRECTION of the chapter: who is on stage, what the talk or scene is about, \
+and its mode or mood (a quarrel, a confession, a theological debate, a courtroom speech, the \
+narrator's digression ...).
+- No events, no outcome, nothing that happens "then" or "finally". No reading advice.
 - Names in the usual Japanese forms (アリョーシャ, ドミートリイ, イワン, フョードル, ゾシマ長老 ...).
+Example: 修道院の庵室で、フョードルの道化ぶりをめぐる気まずい会話。語り手は皮肉な調子。
 
 Output only the orientation text."""
 
