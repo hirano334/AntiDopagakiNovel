@@ -26,6 +26,7 @@ WORK = ROOT / "data/work"
 NS = "{http://www.gribuser.ru/xml/fictionbook/2.0}"
 
 TARGET = 450          # チャンクの目安文字数
+MAX_CHUNK = 550       # チャンクの文字数の上限。1文がこれを超えるなら文の途中（読点など）で切る
 MAX_GROUPS = 3        # 1語に表示する解析候補（見出し語×品詞）の最大数
 MIN_SCORE = 0.05      # これ未満の候補は捨てる（先頭候補は残す）
 PHRASE_MAX = 5
@@ -357,17 +358,40 @@ def sentence_array(text, an):
     return arr
 
 
+CUT_RE = re.compile(r"(?<=[,;:—–])\s+")
+
+
+def split_long(sent):
+    """MAX_CHUNK を超える文を、読点・セミコロン・ダッシュなどの位置でほぼ等分する。"""
+    if len(sent) <= MAX_CHUNK:
+        return [sent]
+    n = math.ceil(len(sent) / TARGET)
+    cuts = [m.end() for m in CUT_RE.finditer(sent)] or [m.end() for m in re.finditer(r"\s+", sent)]
+    out, start = [], 0
+    for k in range(1, n):
+        later = [c for c in cuts if start < c < len(sent)]
+        if not later:
+            break
+        c = min(later, key=lambda c: abs(c - len(sent) * k / n))
+        out.append(sent[start:c].strip())
+        start = c
+    out.append(sent[start:].strip())
+    return out
+
+
 def split_balanced(sents, lens):
     total = sum(lens)
     n = max(1, math.ceil(total / TARGET))
     per = total / n
-    parts, cur, acc = [], [], 0
+    parts, cur, acc, cur_len = [], [], 0, 0
     for s, L in zip(sents, lens):
-        if cur and acc + L / 2 > per * (len(parts) + 1) and len(parts) < n - 1:
+        if cur and (cur_len + L > MAX_CHUNK
+                    or acc + L / 2 > per * (len(parts) + 1) and len(parts) < n - 1):
             parts.append(cur)
-            cur = []
+            cur, cur_len = [], 0
         cur.append(s)
         acc += L
+        cur_len += L
     parts.append(cur)
     return parts
 
@@ -382,7 +406,7 @@ def chunk_chapter(ci, paras, an):
         cur, cur_len = [], 0
 
     for kind, text in paras:
-        sents = [s.text for s in sentenize(text)]
+        sents = [piece for s in sentenize(text) for piece in split_long(s.text)]
         lens = [len(s) for s in sents]
         plen = sum(lens)
         if kind == "h":
